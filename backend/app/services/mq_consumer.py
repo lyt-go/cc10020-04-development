@@ -122,7 +122,11 @@ class MqConsumerService(BaseModuleService):
             if random.random() < 0.2:
                 failed += 1
                 # 路由到死信队列（跨模块：dlq_handler）
-                dlq_record = self._route_to_dlq(consumer_id, msg, "处理超时" if consumed % 3 == 0 else "数据格式异常")
+                dlq_record = self._route_to_dlq(
+                    consumer_id, msg,
+                    "处理超时" if consumed % 3 == 0 else "数据格式异常",
+                    consumer_group=group_name,
+                )
                 dlq_records.append(dlq_record)
             else:
                 consumed += 1
@@ -150,8 +154,9 @@ class MqConsumerService(BaseModuleService):
             "new_offset": self._offsets.get(offset_key, current_offset),
         }
 
-    def _route_to_dlq(self, consumer_id: int, message: dict[str, Any], reason: str) -> dict[str, Any]:
-        """将消费失败的消息路由到死信队列。"""
+    def _route_to_dlq(self, consumer_id: int, message: dict[str, Any], reason: str,
+                      consumer_group: str = "") -> dict[str, Any]:
+        """将消费失败的消息路由到死信队列，保留原队列偏移与消费组。"""
         try:
             from app.services.dlq_handler import DlqHandlerService
             dlq_svc = DlqHandlerService()
@@ -161,6 +166,8 @@ class MqConsumerService(BaseModuleService):
                 original_message=payload_str,
                 failure_reason=reason,
                 consumer_id=consumer_id,
+                offset=message.get("offset"),
+                consumer_group=str(consumer_group or message.get("group", "")),
             )
         except Exception as e:
             return {"ok": False, "reason": str(e)}
@@ -200,6 +207,80 @@ class MqConsumerService(BaseModuleService):
             "messages_consumed": consumer.get("messages_consumed", 0),
             "last_commit_at": consumer.get("last_commit_at"),
             "is_healthy": consumer.get("status") == "消费中" and not consumer.get("abnormal"),
+        }
+
+    def consume_replay(self, consumer_id: int, batch_id: str | None = None,
+                       max_messages: int = 20) -> dict[str, Any]:
+        """消费一轮死信重放的剩余消息，并把消费结论写回确认明细与处置台账。
+
+        只处理确认明细里仍处于「待消费」的原偏移：已经拿到实际消费回执的偏移
+        不会再被消费一次，因此重启后继续本轮也不会重复处理。
+        """
+        consumer = json_store.get_by_id(self.MODULE, consumer_id)
+        if consumer is None:
+            return {"ok": False, "message": f"消费者 {consumer_id} 不存在", "consumed": 0, "failed": 0}
+
+        queue_name = str(consumer.get("队列名称", ""))
+        group_name = str(consumer.get("消费组名", ""))
+
+        from app.services.dlq_replay_ack import DlqReplayAckService
+        ack_svc = DlqReplayAckService()
+        pending = ack_svc.list_pending_for_delivery(
+            batch_id=batch_id,
+            source_queue=queue_name,
+            limit=max_messages,
+        )
+        if not pending:
+            return {
+                "ok": True,
+                "message": "本轮没有仍待消费的消息，已收到回执的偏移不会重复处理",
+                "consumed": 0,
+                "failed": 0,
+                "delivered": [],
+                "batch_id": batch_id or "",
+                "awaiting_settlement": ack_svc.get_round_summary(batch_id)["awaiting_settlement"]
+                if batch_id else 0,
+            }
+
+        consumed = 0
+        failed = 0
+        delivered = []
+        import random
+        for detail in pending:
+            offset = int(detail.get("原始偏移", 0))
+            success = random.random() < 0.8
+            ack = ack_svc.record_consumption_receipt(
+                source_queue=queue_name,
+                offset=offset,
+                consumer_group=group_name,
+                consumer_id=consumer_id,
+                success=success,
+                batch_id=batch_id or str(detail.get("重放批次", "") or ""),
+                note="重放续投消费成功" if success else "重放续投消费失败",
+            )
+            if success:
+                consumed += 1
+                self._record_consumption(consumer_id, {"queue": queue_name}, 50)
+            else:
+                failed += 1
+            delivered.append({
+                "detail_id": ack.get("detail_id"),
+                "offset": offset,
+                "status": ack.get("status"),
+                "voucher": ack.get("voucher", ""),
+                "succeeded": success,
+            })
+
+        summary = ack_svc.get_round_summary(batch_id) if batch_id else {}
+        return {
+            "ok": True,
+            "message": f"重放续投消费完成: 成功 {consumed}, 失败 {failed}",
+            "batch_id": batch_id or "",
+            "consumed": consumed,
+            "failed": failed,
+            "delivered": delivered,
+            "pending_consumption": summary.get("pending_consumption", 0),
+            "awaiting_settlement": summary.get("awaiting_settlement", 0),
         }
 
     def reset_offset(self, consumer_id: int, target_offset: int) -> dict[str, Any]:

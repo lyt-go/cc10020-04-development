@@ -55,6 +55,7 @@ npm run dev
 | 事件结构定义 | `event_schema` | 事件结构 | 结构编号、事件类型、字段名称 |
 | 消息队列消费 | `mq_consumer` | 消费配置 | 配置编号、队列名称、消费组名 |
 | 死信队列管理 | `dlq_handler` | 死信记录 | 记录编号、原始队列、失败原因 |
+| 死信重放确认明细 | `dlq_replay_ack` | 重放确认明细 | 明细编号、原始队列、原始偏移、回执状态 |
 | 认证凭证管理 | `api_auth_store` | 认证凭证 | 凭证编号、关联端点、凭证类型 |
 | 流量控制 | `rate_limit_config` | 限流规则 | 规则编号、关联端点、请求间隔 |
 | 数据转换编排 | `data_transform` | 转换规则 | 规则编号、源Schema、目标Schema |
@@ -76,6 +77,31 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 死信重放确认
+
+死信重放被拆成「重放投递」和「消费确认」两步，避免消息还没重新处理就把处置状态结束掉。
+
+- `dlq_handler.batch_replay()` 只登记确认明细并投递，死信记录保持「待处置」；
+  只有拿到来源队列的实际消费回执，明细才进入「等待本轮结清」。
+- `dlq_replay_ack` 保存明细：原始队列、原始偏移、消费组、重放批次、消费凭证。
+  同一（来源队列, 原始偏移）并发或重复登记只保留一份回执，幂等键随 JSON 落盘，
+  服务重启后仍可按偏移重查。
+- 重启后从处置入口继续本轮：`resume_round` / `mq_consumer.consume_replay` 只续投
+  仍为「待消费」的明细，已收到回执的偏移不会产生第二次处理。
+- 本轮结清（`settle_round`）后消费结论写回确认明细与死信处置台账，处置状态才变「已重放」。
+
+相关接口：
+
+```text
+POST /api/pipeline/dlq-replay                 批量重放（可指定本轮哪些偏移会拿到回执）
+POST /api/pipeline/dlq-replay/backfill-receipts  从待处置死信回填重放回执
+POST /api/pipeline/dlq-replay/consumption-receipt 登记来源队列消费回执（幂等）
+POST /api/pipeline/dlq-replay/continue        重启后继续处理本轮剩余消息
+POST /api/pipeline/dlq-replay/settle          本轮结清
+GET  /api/pipeline/dlq-replay/receipts        按状态/队列/原偏移/批次查询确认明细
+GET  /api/pipeline/dlq-replay/rounds/{batch_id} 查看本轮结清进度
+```
 
 领域：数据工程
 子方向：数据采集、爬虫与RPA

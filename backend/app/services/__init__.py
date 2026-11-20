@@ -7,6 +7,7 @@ from app.services.webhook_channel import WebhookChannelService
 from app.services.event_schema import EventSchemaService
 from app.services.mq_consumer import MqConsumerService
 from app.services.dlq_handler import DlqHandlerService
+from app.services.dlq_replay_ack import DlqReplayAckService
 from app.services.api_auth_store import ApiAuthStoreService
 from app.services.rate_limit_config import RateLimitConfigService
 from app.services.data_transform import DataTransformService
@@ -27,6 +28,7 @@ SERVICES: dict[str, BaseModuleService] = {
     "event_schema": EventSchemaService(),
     "mq_consumer": MqConsumerService(),
     "dlq_handler": DlqHandlerService(),
+    "dlq_replay_ack": DlqReplayAckService(),
     "api_auth_store": ApiAuthStoreService(),
     "rate_limit_config": RateLimitConfigService(),
     "data_transform": DataTransformService(),

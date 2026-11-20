@@ -10,9 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routers import ROUTERS
+from app.services.dlq_handler import DlqHandlerService
 from app.store import store
 
 app = FastAPI(title="API集成与事件编排平台", version="1.0.0")
+
+# 死信处置台账改为持久化读写；首次启动把示例死信落盘，重启后仍能按原偏移重查。
+DlqHandlerService.ensure_seed_data()
 
 app.add_middleware(
     CORSMiddleware,
